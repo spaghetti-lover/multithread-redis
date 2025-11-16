@@ -4,9 +4,9 @@ import (
 	"bufio"
 	"fmt"
 	"net"
+	"strconv"
+	"strings"
 	"time"
-
-	"github.com/spaghetti-lover/multithread-redis/internal/core"
 )
 
 type Client struct {
@@ -37,20 +37,39 @@ func (c *Client) Close() error {
 
 // Set sets a key-value pair
 func (c *Client) Set(key, value string) error {
-	cmd := []interface{}{"SET", key, value}
-	return c.sendCommand(cmd)
+	cmd := encodeArray([]string{"SET", key, value})
+	_, err := c.conn.Write(cmd)
+	if err != nil {
+		return err
+	}
+
+	// Read OK response
+	_, err = c.readResponse()
+	return err
 }
 
 // SetEx sets a key-value pair with expiration in seconds
 func (c *Client) SetEx(key, value string, seconds int64) error {
-	cmd := []interface{}{"SET", key, value, "EX", fmt.Sprintf("%d", seconds)}
-	return c.sendCommand(cmd)
+	cmd := encodeArray([]string{"SET", key, value, "EX", fmt.Sprintf("%d", seconds)})
+	_, err := c.conn.Write(cmd)
+	if err != nil {
+		return err
+	}
+
+	// Read OK response
+	_, err = c.readResponse()
+	return err
 }
 
 // Get retrieves a value by key
 func (c *Client) Get(key string) (string, error) {
-	cmd := []interface{}{"GET", key}
-	resp, err := c.sendCommandWithResponse(cmd)
+	cmd := encodeArray([]string{"GET", key})
+	_, err := c.conn.Write(cmd)
+	if err != nil {
+		return "", err
+	}
+
+	resp, err := c.readResponse()
 	if err != nil {
 		return "", err
 	}
@@ -68,8 +87,13 @@ func (c *Client) Get(key string) (string, error) {
 
 // Ping checks if the server is alive
 func (c *Client) Ping() (string, error) {
-	cmd := []interface{}{"PING"}
-	resp, err := c.sendCommandWithResponse(cmd)
+	cmd := encodeArray([]string{"PING"})
+	_, err := c.conn.Write(cmd)
+	if err != nil {
+		return "", err
+	}
+
+	resp, err := c.readResponse()
 	if err != nil {
 		return "", err
 	}
@@ -81,46 +105,78 @@ func (c *Client) Ping() (string, error) {
 	return "PONG", nil
 }
 
-// sendCommand sends a command without waiting for response
-func (c *Client) sendCommand(cmd []interface{}) error {
-	respData := core.Encode(cmd, false)
-	_, err := c.conn.Write(respData)
-	return err
-}
-
-// sendCommandWithResponse sends a command and waits for response
-func (c *Client) sendCommandWithResponse(cmd []interface{}) (interface{}, error) {
-	// Send command
-	respData := core.Encode(cmd, false)
-	_, err := c.conn.Write(respData)
-	if err != nil {
-		return nil, fmt.Errorf("failed to send command: %w", err)
-	}
-
-	// Read response
+// readResponse reads and decodes RESP response
+func (c *Client) readResponse() (interface{}, error) {
 	reader := bufio.NewReader(c.conn)
 
-	// Read first byte to determine response type
-	_, err = reader.ReadByte()
+	line, err := reader.ReadString('\n')
 	if err != nil {
-		return nil, fmt.Errorf("failed to read response: %w", err)
+		return nil, err
 	}
 
-	// Unread the first byte so Decode can read it
-	reader.UnreadByte()
-
-	// Read all available data
-	buf := make([]byte, 4096)
-	n, err := reader.Read(buf)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response data: %w", err)
+	if len(line) < 3 {
+		return nil, fmt.Errorf("invalid response")
 	}
 
-	// Decode RESP response
-	decoded, err := core.Decode(buf[:n])
-	if err != nil {
-		return nil, fmt.Errorf("failed to decode response: %w", err)
+	line = strings.TrimSuffix(line, "\r\n")
+
+	switch line[0] {
+	case '+': // Simple String
+		return line[1:], nil
+	case '-': // Error
+		return nil, fmt.Errorf(line[1:])
+	case ':': // Integer
+		val, err := strconv.ParseInt(line[1:], 10, 64)
+		if err != nil {
+			return nil, err
+		}
+		return val, nil
+	case '$': // Bulk String
+		length, err := strconv.Atoi(line[1:])
+		if err != nil {
+			return nil, err
+		}
+		if length == -1 {
+			return nil, nil // Null bulk string
+		}
+
+		buf := make([]byte, length+2) // +2 for \r\n
+		_, err = reader.Read(buf)
+		if err != nil {
+			return nil, err
+		}
+		return string(buf[:length]), nil
+	case '*': // Array
+		count, err := strconv.Atoi(line[1:])
+		if err != nil {
+			return nil, err
+		}
+		if count == -1 {
+			return nil, nil
+		}
+
+		result := make([]interface{}, count)
+		for i := 0; i < count; i++ {
+			val, err := c.readResponse()
+			if err != nil {
+				return nil, err
+			}
+			result[i] = val
+		}
+		return result, nil
+	default:
+		return nil, fmt.Errorf("unknown response type: %c", line[0])
+	}
+}
+
+// encodeArray encodes string array to RESP array format
+func encodeArray(args []string) []byte {
+	var result strings.Builder
+
+	result.WriteString(fmt.Sprintf("*%d\r\n", len(args)))
+	for _, arg := range args {
+		result.WriteString(fmt.Sprintf("$%d\r\n%s\r\n", len(arg), arg))
 	}
 
-	return decoded, nil
+	return []byte(result.String())
 }
