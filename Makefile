@@ -26,6 +26,9 @@ deploy:
 	docker build -f Dockerfile.render -t myredis-app .
 	docker run -p 3000:3000 -p 8080:8080 -p 6379:6379 myredis-app
 
+# Document
+doc:
+	pkgsite -http :8080
 # Clean up
 clean:
 	docker-compose down -v

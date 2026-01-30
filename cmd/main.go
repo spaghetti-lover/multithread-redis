@@ -21,11 +21,11 @@ func main() {
 	wg.Add(2)
 
 	//Run single threaded server with epoll/kqueue
-	//go server.RunIoMultiplexingServer(&wg)
+	go server.RunIoMultiplexingServer(&wg)
 
 	//Run multi-threaded server with epoll/kqueue
 	s := server.NewServer()
-	go s.StartSingleListener(&wg)
+	//go s.StartSingleListener(&wg)
 	//go s.StartMultiListeners(&wg)
 
 	go server.WaitForSignal(&wg, sigChan, s)
